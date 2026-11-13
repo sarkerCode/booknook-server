@@ -317,6 +317,10 @@ app.delete("/my-borrows/:id", verifyToken, async (req, res) => {
   }
 });
 
+app.get("/", (req, res) => {
+  res.send("BookNook Server is running");
+});
+
 app.listen(process.env.PORT, () => {
   console.log(`Server is running at ${process.env.PORT}`);
 });
