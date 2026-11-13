@@ -2,7 +2,7 @@ import express from "express";
 import { MongoClient, ObjectId } from "mongodb";
 import cors from "cors";
 import "dotenv/config";
-import { createRemoteJWKSet } from "jose";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 
 const app = express();
 
@@ -47,7 +47,7 @@ export const verifyToken = async (req, res, next) => {
 };
 
 
-app.post("/add-book", async (req, res) => {
+app.post("/add-book", verifyToken, async (req, res) => {
   const book = req.body;
   try {
     if (book.totalCopies !== undefined) {
@@ -117,7 +117,7 @@ app.get("/book/:id", async (req, res) => {
   }
 });
 
-app.get("/my-books/:email", async (req, res) => {
+app.get("/my-books/:email", verifyToken, async (req, res) => {
   const { email } = req.params;
   try {
     const books = await booksCollection
@@ -137,7 +137,7 @@ app.get("/my-books/:email", async (req, res) => {
 });
 
 //update my-books book
-app.patch("/my-books/:id", async (req, res) => {
+app.patch("/my-books/:id", verifyToken,  async (req, res) => {
   const { id } = req.params;
   const updatedBook = req.body;
   delete updatedBook._id;
@@ -163,7 +163,7 @@ app.patch("/my-books/:id", async (req, res) => {
   }
 });
 
-app.delete("/my-books/:id", async (req, res) => {
+app.delete("/my-books/:id", verifyToken, async (req, res) => {
   const { id } = req.params;
 
   try {
@@ -181,7 +181,7 @@ app.delete("/my-books/:id", async (req, res) => {
 });
 
 //Borrowed Books API - borrow a book, check double borrow, and decrease copies with $inc
-app.post("/my-borrows", async (req, res) => {
+app.post("/my-borrows", verifyToken, async (req, res) => {
   const borrow = req.body;
   try {
     if (!borrow.bookId) {
@@ -256,7 +256,7 @@ app.post("/my-borrows", async (req, res) => {
 });
 
 //get the borrows of the logged in user
-app.get("/my-borrows/:email", async (req, res) => {
+app.get("/my-borrows/:email", verifyToken, async (req, res) => {
   const { email } = req.params;
   try {
     const borrows = await borrowsBooksCollection.find({ userEmail: email }).toArray();
@@ -268,7 +268,7 @@ app.get("/my-borrows/:email", async (req, res) => {
 });
 
 //delete borrowed book / return a book and increase copies by 1 with $inc
-app.delete("/my-borrows/:id", async (req, res) => {
+app.delete("/my-borrows/:id", verifyToken, async (req, res) => {
   const { id } = req.params;
 
   try {
