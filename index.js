@@ -2,6 +2,7 @@ import express from "express";
 import { MongoClient, ObjectId } from "mongodb";
 import cors from "cors";
 import "dotenv/config";
+import { createRemoteJWKSet } from "jose";
 
 const app = express();
 
@@ -24,6 +25,27 @@ const mongoClient = await connectToMongoDB();
 const db = mongoClient.db(process.env.DB_NAME);
 const booksCollection = db.collection("books");
 const borrowsBooksCollection = db.collection("borrows");
+
+const JWKS = createRemoteJWKSet(new URL(process.env.JWKS_URI));
+
+export const verifyToken = async (req, res, next) => {
+  const authHeader = req.headers.authorization;
+  // 1. Check if Authorization header exists and starts with Bearer
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).json({ message: "Unauthorized: No token provided" });
+  }
+  const token = authHeader.split(" ")[1];
+  try {
+    
+    const { payload } = await jwtVerify(token, JWKS);
+    req.user = payload;
+    next();
+  } catch (err) {
+    console.error("JWT Verify Error:", err.message);
+    return res.status(403).json({ message: "Forbidden: Invalid or expired token" });
+  }
+};
+
 
 app.post("/add-book", async (req, res) => {
   const book = req.body;
@@ -158,7 +180,7 @@ app.delete("/my-books/:id", async (req, res) => {
   }
 });
 
-//Borrowed Books API - borrow a book and decrease inventory (never negative)
+//Borrowed Books API - borrow a book, check double borrow, and decrease copies with $inc
 app.post("/my-borrows", async (req, res) => {
   const borrow = req.body;
   try {
@@ -166,7 +188,23 @@ app.post("/my-borrows", async (req, res) => {
       return res.status(400).json({ message: "Book ID is required" });
     }
 
-    // 1. Find book to verify inventory
+    if (!borrow.userEmail) {
+      return res.status(400).json({ message: "User email is required" });
+    }
+
+    // 1. No Double Borrow: Check if user already borrowed this book
+    const existingBorrow = await borrowsBooksCollection.findOne({
+      userEmail: borrow.userEmail,
+      bookId: borrow.bookId,
+    });
+
+    if (existingBorrow) {
+      return res.status(400).json({
+        message: "You have already borrowed this book. You cannot borrow the same book twice at the same time.",
+      });
+    }
+
+    // 2. Find book to verify existence
     let book = null;
     try {
       book = await booksCollection.findOne({ _id: new ObjectId(borrow.bookId) });
@@ -178,25 +216,38 @@ app.post("/my-borrows", async (req, res) => {
       return res.status(404).json({ message: "Book not found" });
     }
 
-    // 2. Parse current inventory and ensure it is not 0 or negative
-    const currentCopies = Math.max(0, Number(book.totalCopies) || 0);
-    if (currentCopies <= 0) {
-      return res.status(400).json({ message: "This book is currently out of stock." });
+    // Ensure totalCopies is a numeric value in DB for $inc operator compatibility
+    if (typeof book.totalCopies === "string") {
+      await booksCollection.updateOne(
+        { _id: new ObjectId(borrow.bookId) },
+        { $set: { totalCopies: Math.max(0, Number(book.totalCopies) || 0) } }
+      );
     }
 
-    // 3. Decrement inventory (guaranteed never negative)
-    const newCopies = Math.max(0, currentCopies - 1);
-    await booksCollection.updateOne(
-      { _id: new ObjectId(borrow.bookId) },
-      { $set: { totalCopies: newCopies } }
+    // 3. Atomically decrease copies by 1 with $inc (only if totalCopies > 0)
+    const updateResult = await booksCollection.findOneAndUpdate(
+      {
+        _id: new ObjectId(borrow.bookId),
+        totalCopies: { $gt: 0 },
+      },
+      {
+        $inc: { totalCopies: -1 },
+      },
+      { returnDocument: "after" }
     );
+
+    if (!updateResult) {
+      return res.status(400).json({ message: "This book is currently not available." });
+    }
+
+    const remainingCopies = updateResult.totalCopies;
 
     // 4. Save borrow record
     const result = await borrowsBooksCollection.insertOne(borrow);
     res.status(201).json({
       message: "Borrow record added successfully",
       borrowId: result.insertedId,
-      remainingCopies: newCopies,
+      remainingCopies,
     });
   } catch (err) {
     console.error(err);
@@ -216,7 +267,7 @@ app.get("/my-borrows/:email", async (req, res) => {
   }
 });
 
-//delete borrowed book / return a book and increase inventory (never negative)
+//delete borrowed book / return a book and increase copies by 1 with $inc
 app.delete("/my-borrows/:id", async (req, res) => {
   const { id } = req.params;
 
@@ -239,18 +290,21 @@ app.delete("/my-borrows/:id", async (req, res) => {
       return res.status(404).json({ message: "Borrow record not found" });
     }
 
-    // 2. Increase inventory for the returned book, never negative
+    // 2. Increase inventory for the returned book by 1 with $inc
     if (borrow.bookId) {
       try {
         const book = await booksCollection.findOne({ _id: new ObjectId(borrow.bookId) });
-        if (book) {
-          const currentCopies = Math.max(0, Number(book.totalCopies) || 0);
-          const newCopies = Math.max(0, currentCopies + 1);
+        if (book && typeof book.totalCopies === "string") {
           await booksCollection.updateOne(
             { _id: new ObjectId(borrow.bookId) },
-            { $set: { totalCopies: newCopies } }
+            { $set: { totalCopies: Math.max(0, Number(book.totalCopies) || 0) } }
           );
         }
+
+        await booksCollection.updateOne(
+          { _id: new ObjectId(borrow.bookId) },
+          { $inc: { totalCopies: 1 } }
+        );
       } catch (bookErr) {
         console.error("Failed to restore inventory on book return:", bookErr);
       }
